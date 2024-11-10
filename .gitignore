@@ -4,3 +4,7 @@
 
 ## Large data - tracked with git lfs instead
 /data/geospatial/*.tif
+
+node_modules
+
+/frontend/node_modules

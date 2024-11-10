@@ -1,9 +1,9 @@
-import { memo } from 'react';
-import type { FC } from 'react';
+import { memo } from "react";
+import type { FC } from "react";
 
-import classes from './App.module.css';
-import resets from './components/_resets.module.css';
-import { Screen4 } from './components/Screen4/Screen4';
+import classes from "./App.module.css";
+import resets from "./components/_resets.module.css";
+import { Xyra } from "./components/Xyra/Xyra";
 
 interface Props {
   className?: string;
@@ -11,7 +11,7 @@ interface Props {
 export const App: FC<Props> = memo(function App(props = {}) {
   return (
     <div className={`${resets.clapyResets} ${classes.root}`}>
-      <Screen4 />
+      <Xyra />
     </div>
   );
 });
