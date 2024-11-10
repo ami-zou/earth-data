@@ -25,9 +25,6 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 processor = AutoProcessor.from_pretrained(model_name)
 model = AutoModelForZeroShotImageClassification.from_pretrained(model_name)
 
-# Initialize image-to-text model for explanations
-image_to_text = pipeline("image-to-text", model="Salesforce/blip-image-captioning-large")
-
 # Load additional data sources
 def load_data_sources():
     try:
@@ -57,32 +54,60 @@ def load_data_sources():
 # Load additional data sources
 data_sources = load_data_sources()
 
-def analyze_data(query, country_code, data_sources):
+def analyze_data(query, country_code, hit_payload):
     """Analyze data based on query and return insights"""
     insights = []
     figures = []
     
-    if "poverty" in query.lower():
-        poverty_trend = data_sources["poverty"][
-            data_sources["poverty"]["country_code"] == country_code
-        ].sort_values("year")
+    if "drought" in query.lower():
+        metadata = hit_payload.get("metadata", {})
+        drought_data = metadata.get("drought", {})
         
-        fig = px.line(poverty_trend, x="year", y="poverty_rate", 
-                     title=f"Poverty Trend in {country_code}")
-        figures.append(fig)
-        
-        avg_poverty = poverty_trend["poverty_rate"].mean()
-        insights.append(f"Average poverty rate in {country_code}: {avg_poverty:.2f}%")
-    
-    if "population" in query.lower():
-        # Add population analysis
-        pass
+        # Find most recent year with data
+        if years := [int(year) for year in drought_data.keys() if year.isdigit()]:
+            most_recent_year = str(max(years))
+            if total_pop := drought_data[most_recent_year].get("Total population", {}):
+                if values := total_pop.get("values", []):
+                    drought_levels = {item["name"]: item["population"] for item in values}
+                    
+                    # Calculate percentages and add insights
+                    total = sum(drought_levels.values())
+                    if total > 0:
+                        for level, pop in drought_levels.items():
+                            percentage = (pop / total) * 100
+                            if pop > 0:
+                                insights.append(f"{level}: {pop:,} people ({percentage:.1f}%)")
+                        
+                        # Create visualization
+                        fig = px.pie(
+                            values=list(drought_levels.values()),
+                            names=list(drought_levels.keys()),
+                            title=f"Population Distribution by Drought Level ({most_recent_year})"
+                        )
+                        figures.append(fig)
     
     return insights, figures
 
-def generate_image_explanation(image):
-    """Generate text explanation for an image"""
-    return image_to_text(image)[0]["generated_text"]
+def generate_image_explanation(hit_payload):
+    """Generate explanation from image metadata"""
+    metadata = hit_payload.get("metadata", {})
+    drought_data = metadata.get("drought", {})
+
+    print(f"metadata: {metadata}")
+    print(f"drought_data: {drought_data}")
+
+    
+    if years := [int(year) for year in drought_data.keys() if year.isdigit()]:
+        year = str(max(years))
+        if total_pop := drought_data[year].get("Total population", {}):
+            if values := total_pop.get("values", []):
+                severe_conditions = [item for item in values if "severe" in item["name"].lower() or "extreme" in item["name"].lower()]
+                affected_pop = sum(item["population"] for item in severe_conditions)
+                
+                if affected_pop > 0:
+                    return f"Satellite image from {year} showing areas where {affected_pop:,} people were affected by severe or extreme drought conditions"
+    
+    return "Satellite image (year unknown)"
 
 def chat_response(message, history):
     """Process chat messages and return multi-modal response"""
@@ -117,21 +142,20 @@ def chat_response(message, history):
         
         hits = client.search(**search_params)
         
-        # Analyze data and get insights
-        insights, figures = analyze_data(message, country_code, data_sources)
-        
-        # Prepare response with initial insights
+        # Process each hit
         response = "\n\n**Data Insights:**\n"
-        
-        # Add text insights
-        for insight in insights:
-            response += f"- {insight}\n"
-        
-        # Process images and add explanations
         images = []
         image_explanations = []
         
         for hit in hits:
+            # Analyze data and get insights for each hit
+            insights, figures = analyze_data(message, country_code, hit.payload)
+            
+            # Add text insights
+            for insight in insights:
+                response += f"- {insight}\n"
+            
+            # Process image
             img_size = tuple(hit.payload['img_size'])
             pixel_lst = hit.payload['pixel_lst']
             
@@ -139,18 +163,17 @@ def chat_response(message, history):
             new_image.putdata(list(map(lambda x: tuple(x), pixel_lst)))
             
             # Generate explanation for image
-            explanation = generate_image_explanation(new_image)
+            explanation = generate_image_explanation(hit.payload)
             image_explanations.append(explanation)
             images.append(new_image)
         
         # Add image explanations to response
-        response += "\n\n**Satellite Image Analysis:**\n"
+        response += "\n\n**Satellite Image Details:**\n"
         for i, explanation in enumerate(image_explanations):
             response += f"- Image {i+1}: {explanation}\n"
         
         return response, images, figures
     except Exception as e:
-        # Add error handling
         print(f"Error in chat_response: {str(e)}")
         return f"An error occurred: {str(e)}", [], []
 

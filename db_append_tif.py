@@ -8,6 +8,7 @@ import os
 from PIL import Image
 import rasterio
 import json
+import glob
 
 client = QdrantClient("localhost", port=6333)
 print("[INFO] Client created...")
@@ -39,14 +40,27 @@ def preprocess_tif(tif_path, target_size=(224, 224)):
         return img
 
 def load_metadata_files(metadata_dir):
-    """Load all country metadata files into a dictionary"""
-    metadata_dict = {}
-    for filename in os.listdir(metadata_dir):
-        if filename.endswith('_summary.json'):
-            country_code = filename[:3]  # Extract country code from filename
-            with open(os.path.join(metadata_dir, filename), 'r') as f:
-                metadata_dict[country_code] = json.load(f)
-    return metadata_dict
+    metadata_files = []
+    for file in glob.glob(os.path.join(metadata_dir, '*.json')):
+        with open(file, 'r') as f:
+            data = json.load(f)
+            # Handle different JSON structures
+            if 'metadata' in data:
+                # For summary files
+                metadata_files.append({
+                    'metadata': data['metadata'],
+                    'drought': data.get('drought', {})
+                })
+            elif 'results' in data:
+                # For population files
+                metadata_files.append({
+                    'metadata': {
+                        'date': data.get('results', {}).get('data', {}).get('report', {}).get('date'),
+                        'area_of_interest': data.get('results', {}).get('data', {}).get('report', {}).get('area_of_interest')
+                    },
+                    'drought': data.get('results', {}).get('data', {}).get('report', {}).get('drought', {})
+                })
+    return metadata_files
 
 def load_tif_images(directory_path, metadata_dir=None):
     images = []
@@ -130,13 +144,15 @@ for idx, sample in tqdm(enumerate(ds), total=len(ds)):
     
     # Add metadata to payload if available
     if 'metadata' in sample:
+        # Since metadata is a list of dictionaries, take the first one
+        # or handle multiple metadata entries as needed
+        metadata = sample['metadata'][0]  # Get first metadata entry
         payload.update({
             "metadata": sample['metadata'],
-            # Extract specific fields for direct querying
-            "date": sample['metadata'].get('date'),
-            "area_of_interest": sample['metadata'].get('area_of_interest', {}).get('name'),
-            "drought_severity": sample['metadata'].get('drought_severity'),
-            # Add any other specific fields you want to query directly
+            # Extract specific fields from the first metadata entry
+            "date": metadata.get('date'),
+            "area_of_interest": metadata.get('area_of_interest', {}).get('name'),
+            "drought_severity": metadata.get('drought_severity'),
         })
     
     records.append(models.Record(
