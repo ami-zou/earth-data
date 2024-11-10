@@ -1,0 +1,6 @@
+## Virtual environment and cache
+/__pycache__/
+/venv/
+
+## Large data - tracked with git lfs instead
+/data/geospatial/*.tif
