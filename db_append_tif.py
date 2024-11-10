@@ -7,13 +7,14 @@ import numpy as np
 import os
 from PIL import Image
 import rasterio
+import json
 
 client = QdrantClient("localhost", port=6333)
 print("[INFO] Client created...")
 
-#loading the dataset
 def preprocess_tif(tif_path, target_size=(224, 224)):
     with rasterio.open(tif_path) as src:
+        # Calculate NDVI or other drought indices if applicable
         img_array = src.read()
         
         # Convert data type to uint8 if it's not already
@@ -37,31 +38,66 @@ def preprocess_tif(tif_path, target_size=(224, 224)):
         img = img.resize(target_size)
         return img
 
-def load_tif_images(directory_path):
+def load_metadata_files(metadata_dir):
+    """Load all country metadata files into a dictionary"""
+    metadata_dict = {}
+    for filename in os.listdir(metadata_dir):
+        if filename.endswith('_summary.json'):
+            country_code = filename[:3]  # Extract country code from filename
+            with open(os.path.join(metadata_dir, filename), 'r') as f:
+                metadata_dict[country_code] = json.load(f)
+    return metadata_dict
+
+def load_tif_images(directory_path, metadata_dir=None):
     images = []
+    
+    # Load all metadata files if provided
+    metadata_by_country = {}
+    if metadata_dir and os.path.exists(metadata_dir):
+        metadata_by_country = load_metadata_files(metadata_dir)
+    
     for filename in os.listdir(directory_path):
         if filename.endswith('.tif'):
+            country_code = filename[:3]  # Extract country code from filename
             tif_path = os.path.join(directory_path, filename)
+            
             try:
                 # Add debug information
                 with rasterio.open(tif_path) as src:
                     print(f"Processing {filename}:")
+                    print(f"  Country: {country_code}")
                     print(f"  Shape: {src.shape}")
                     print(f"  Data type: {src.dtypes}")
                     print(f"  Number of bands: {src.count}")
                 
                 img = preprocess_tif(tif_path)
-                images.append({
+                
+                # Create image data dictionary
+                image_data = {
                     'image': img,
-                    'filename': filename
-                })
+                    'filename': filename,
+                    'country_code': country_code
+                }
+                
+                # Add metadata if available for this country
+                if country_code in metadata_by_country:
+                    image_data['metadata'] = metadata_by_country[country_code]
+                else:
+                    print(f"Warning: No metadata found for country {country_code}")
+                
+                images.append(image_data)
+                
             except Exception as e:
                 print(f"Error processing {filename}: {str(e)}")
                 continue
+    
     return images
 
 print("[INFO] Loading dataset...")
-ds = load_tif_images('./data/geospatial')
+ds = load_tif_images(
+    './data/geospatial', 
+    metadata_dir='./data/metadata'  # Directory containing country metadata files
+)
 
 #loading the model 
 print("[INFO] Loading the model...")
@@ -83,36 +119,59 @@ for idx, sample in tqdm(enumerate(ds), total=len(ds)):
     img_embds = model.get_image_features(processed_img).detach().numpy().tolist()[0]
     img_px = list(sample['image'].getdata())
     img_size = sample['image'].size 
+    
+    # Create payload with metadata if available
+    payload = {
+        "pixel_lst": img_px, 
+        "img_size": img_size,
+        "filename": sample['filename'],
+        "country_code": sample['country_code']  # Add country code to payload
+    }
+    
+    # Add metadata to payload if available
+    if 'metadata' in sample:
+        payload.update({
+            "metadata": sample['metadata'],
+            # Extract specific fields for direct querying
+            "date": sample['metadata'].get('date'),
+            "area_of_interest": sample['metadata'].get('area_of_interest', {}).get('name'),
+            "drought_severity": sample['metadata'].get('drought_severity'),
+            # Add any other specific fields you want to query directly
+        })
+    
     records.append(models.Record(
-        id=idx, 
+        id=idx + start_id,
         vector=img_embds, 
-        payload={
-            "pixel_lst": img_px, 
-            "img_size": img_size,
-            "filename": sample['filename']  # Store filename instead of captions
-        }
+        payload=payload
     ))
 
-#uploading the records to client
-print("[INFO] Uploading data records to existing data collection...")
-#It's better to upload chunks of data to the VectorDB 
-for i in range(30,len(records), 30):
-    print(f"finished {i}")
-    client.upload_points(
-        collection_name="satellite_img_db",
-        points=records[i-30:i],
-    )
+try:
+    #uploading the records to client
+    print("[INFO] Uploading data records to existing data collection...")
+    #It's better to upload chunks of data to the VectorDB 
+    for i in range(30,len(records), 30):
+        print(f"finished {i}")
+        client.upload_points(
+            collection_name="satellite_img_db",
+            points=records[i-30:i],
+        )
 
-# Don't forget to upload the last batch if it's smaller than 30
-if len(records) % 30 != 0:
-    remaining_records = records[-(len(records) % 30):]
-    client.upload_points(
-        collection_name="satellite_img_db",
-        points=remaining_records,
-    )
+    # Don't forget to upload the last batch if it's smaller than 30
+    if len(records) % 30 != 0:
+        remaining_records = records[-(len(records) % 30):]
+        client.upload_points(
+            collection_name="satellite_img_db",
+            points=remaining_records,
+        )
 
-print("[INFO] Successfully uploaded data records to data collection!")
+    print("[INFO] Successfully uploaded data records to data collection!")
 
-# Close the client connection
-client.close()
-print("[INFO] Client connection closed")
+except Exception as e:
+    print(f"[ERROR] An error occurred: {str(e)}")
+
+finally:
+    try:
+        client.close()
+        print("[INFO] Client connection closed successfully")
+    except Exception as e:
+        print(f"[WARNING] Error while closing client connection: {str(e)}")
