@@ -144,16 +144,19 @@ for idx, sample in tqdm(enumerate(ds), total=len(ds)):
     
     # Add metadata to payload if available
     if 'metadata' in sample:
-        # Since metadata is a list of dictionaries, take the first one
-        # or handle multiple metadata entries as needed
         metadata = sample['metadata'][0]  # Get first metadata entry
         payload.update({
             "metadata": sample['metadata'],
-            # Extract specific fields from the first metadata entry
             "date": metadata.get('date'),
             "area_of_interest": metadata.get('area_of_interest', {}).get('name'),
             "drought_severity": metadata.get('drought_severity'),
+            "drought_data": metadata.get('drought', {})
         })
+        
+        # Debug print to verify data
+        print(f"\nPayload for {sample['filename']}:")
+        print(f"Metadata included: {bool(sample['metadata'])}")
+        print(f"Drought data included: {bool(metadata.get('drought', {}))}")
     
     records.append(models.Record(
         id=idx + start_id,

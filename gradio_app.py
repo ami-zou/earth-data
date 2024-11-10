@@ -54,149 +54,372 @@ def load_data_sources():
 # Load additional data sources
 data_sources = load_data_sources()
 
-def analyze_data(query, country_code, hit_payload):
-    """Analyze data based on query and return insights"""
-    insights = []
-    figures = []
-    
-    if "drought" in query.lower():
-        metadata = hit_payload.get("metadata", {})
-        drought_data = metadata.get("drought", {})
-        
-        # Find most recent year with data
-        if years := [int(year) for year in drought_data.keys() if year.isdigit()]:
-            most_recent_year = str(max(years))
-            if total_pop := drought_data[most_recent_year].get("Total population", {}):
-                if values := total_pop.get("values", []):
-                    drought_levels = {item["name"]: item["population"] for item in values}
-                    
-                    # Calculate percentages and add insights
-                    total = sum(drought_levels.values())
-                    if total > 0:
-                        for level, pop in drought_levels.items():
-                            percentage = (pop / total) * 100
-                            if pop > 0:
-                                insights.append(f"{level}: {pop:,} people ({percentage:.1f}%)")
-                        
-                        # Create visualization
-                        fig = px.pie(
-                            values=list(drought_levels.values()),
-                            names=list(drought_levels.keys()),
-                            title=f"Population Distribution by Drought Level ({most_recent_year})"
-                        )
-                        figures.append(fig)
-    
-    return insights, figures
-
-def generate_image_explanation(hit_payload):
-    """Generate explanation from image metadata"""
-    metadata = hit_payload.get("metadata", {})
-    drought_data = metadata.get("drought", {})
-
-    print(f"metadata: {metadata}")
-    print(f"drought_data: {drought_data}")
-
-    
-    if years := [int(year) for year in drought_data.keys() if year.isdigit()]:
-        year = str(max(years))
-        if total_pop := drought_data[year].get("Total population", {}):
-            if values := total_pop.get("values", []):
-                severe_conditions = [item for item in values if "severe" in item["name"].lower() or "extreme" in item["name"].lower()]
-                affected_pop = sum(item["population"] for item in severe_conditions)
-                
-                if affected_pop > 0:
-                    return f"Satellite image from {year} showing areas where {affected_pop:,} people were affected by severe or extreme drought conditions"
-    
-    return "Satellite image (year unknown)"
-
 def chat_response(message, history):
     """Process chat messages and return multi-modal response"""
     try:
         # Process text query for vector search
-        try:
-            inputs = tokenizer(message, padding=True, truncation=True, return_tensors="pt")
-            text_embeddings = model.get_text_features(**inputs).detach().numpy().tolist()[0]
-        except Exception as tokenizer_error:
-            print(f"Tokenization error: {str(tokenizer_error)}")
-            return "Sorry, I couldn't process your message. Please try rephrasing it.", [], []
+        inputs = tokenizer(message, padding=True, truncation=True, return_tensors="pt")
+        text_embeddings = model.get_text_features(**inputs).detach().numpy().tolist()[0]
         
         # Extract country code from message
         country_code = next((code for code in ["SOM", "KEN", "ETH"] if code in message.upper()), None)
+        print(f"\nSearching for country: {country_code}")
         
-        # Search for relevant images
+        # Construct search parameters
         search_params = {
             "collection_name": "satellite_img_db",
             "query_vector": text_embeddings,
-            "limit": 3
+            "limit": 5
         }
         
         if country_code:
             search_params["query_filter"] = models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="country_code",
-                        match=models.MatchValue(value=country_code)
-                    )
-                ]
+                must=[models.FieldCondition(key="country_code", match=models.MatchValue(value=country_code))]
             )
         
-        hits = client.search(**search_params)
+        # Debug print search parameters
+        print(f"Search parameters: {search_params}")
         
-        # Process each hit
-        response = "\n\n**Data Insights:**\n"
+        # Perform search
+        hits = client.search(**search_params)
+        print(f"Found {len(hits)} hits from Qdrant")
+        
+        # Debug print first hit if available
+        if hits:
+            print("\nFirst hit payload:")
+            print(json.dumps(hits[0].payload, indent=2))
+        
+        context_data = []
         images = []
-        image_explanations = []
         
         for hit in hits:
-            # Analyze data and get insights for each hit
-            insights, figures = analyze_data(message, country_code, hit.payload)
+            # Convert all payload data to a structured format for analysis
+            metadata_context = {
+                "image_info": {
+                    "filename": hit.payload.get("filename", ""),
+                    "country": hit.payload.get("country_code", ""),
+                    "date": hit.payload.get("date", "")
+                }
+            }
             
-            # Add text insights
-            for insight in insights:
-                response += f"- {insight}\n"
+            # Add all metadata fields
+            if "metadata" in hit.payload:
+                metadata_context["metadata"] = hit.payload["metadata"]
             
-            # Process image
-            img_size = tuple(hit.payload['img_size'])
-            pixel_lst = hit.payload['pixel_lst']
+            # Add any drought-specific data
+            if "drought_data" in hit.payload:
+                metadata_context["drought_data"] = hit.payload["drought_data"]
             
-            new_image = Image.new("RGB", img_size)
-            new_image.putdata(list(map(lambda x: tuple(x), pixel_lst)))
+            # Add any other relevant fields
+            for key, value in hit.payload.items():
+                if key not in ["pixel_lst", "img_size", "metadata", "drought_data"]:
+                    metadata_context[key] = value
             
-            # Generate explanation for image
-            explanation = generate_image_explanation(hit.payload)
-            image_explanations.append(explanation)
-            images.append(new_image)
+            context_data.append(metadata_context)
+            
+            # Process image if available
+            if all(k in hit.payload for k in ['img_size', 'pixel_lst']):
+                img_size = tuple(hit.payload['img_size'])
+                pixel_lst = hit.payload['pixel_lst']
+                new_image = Image.new("RGB", img_size)
+                new_image.putdata(list(map(lambda x: tuple(x), pixel_lst)))
+                images.append(new_image)
         
-        # Add image explanations to response
-        response += "\n\n**Satellite Image Details:**\n"
-        for i, explanation in enumerate(image_explanations):
-            response += f"- Image {i+1}: {explanation}\n"
+        print(f"\nCollected {len(context_data)} items for analysis")
+        if context_data:
+            print("\nFirst context item:")
+            print(json.dumps(context_data[0], indent=2))
         
-        return response, images, figures
+        # Generate analysis
+        analysis = analyze_context(message, context_data)
+        
+        return analysis['response'], images, analysis['figures']
+        
     except Exception as e:
         print(f"Error in chat_response: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         return f"An error occurred: {str(e)}", [], []
 
-def process_text(text):
-    inp = tokenizer(text, return_tensors="pt")
-    text_embeddings = model.get_text_features(**inp).detach().numpy().tolist()[0]
-    hits = client.search(
-        collection_name="satellite_img_db",
-        query_vector=text_embeddings,
-        limit=1,
-    )
+def analyze_context(question, context_data):
+    """Analyze context data based on the question using semantic understanding"""
+    try:
+        print("\nStarting analysis...")
+        print(f"Question: {question}")
+        
+        # Identify the type of analysis needed based on the question
+        analysis_type = identify_analysis_type(question)
+        print(f"Analysis type: {analysis_type}")
+        
+        # Extract relevant data points from context
+        relevant_data = extract_relevant_data(context_data, analysis_type)
+        print(f"Found {len(relevant_data)} relevant data points")
+        
+        if not relevant_data:
+            return {
+                "response": "No relevant data found for your question.",
+                "figures": []
+            }
+        
+        # Generate visualizations based on the data and question
+        figures = generate_visualizations(relevant_data, analysis_type)
+        print(f"Generated {len(figures)} visualizations")
+        
+        # Generate natural language response
+        response = generate_response(question, relevant_data, analysis_type)
+        print("Generated response")
+        
+        return {
+            "response": response,
+            "figures": figures
+        }
+    except Exception as e:
+        print(f"Error in analysis: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return {"response": str(e), "figures": []}
 
-    # images = []
-    for hit in hits:
-        img_size = tuple(hit.payload['img_size'])
-        pixel_lst = hit.payload['pixel_lst']
+def identify_analysis_type(question):
+    """Identify the type of analysis needed based on the question"""
+    # Add semantic matching logic here
+    question_lower = question.lower()
+    
+    if any(word in question_lower for word in ['correlation', 'relationship', 'compare']):
+        return 'correlation'
+    elif any(word in question_lower for word in ['trend', 'over time', 'historical']):
+        return 'trend'
+    elif any(word in question_lower for word in ['current', 'latest', 'now']):
+        return 'current_state'
+    else:
+        return 'general'
 
-        # Create an image from pixel data
-        new_image = Image.new("RGB", img_size)
-        new_image.putdata(list(map(lambda x: tuple(x), pixel_lst)))
-        # images.append(new_image)
+def extract_relevant_data(context_data, analysis_type):
+    """Extract relevant data points based on analysis type"""
+    relevant_data = []
+    
+    print(f"\nAnalyzing {len(context_data)} context items")
+    
+    for item in context_data:
+        print("\nContext item:")
+        print(f"Keys available: {item.keys()}")
+        
+        if 'metadata' in item:
+            print("Metadata found:")
+            print(json.dumps(item['metadata'], indent=2))
+        
+        # Extract all numerical and categorical data
+        extracted = extract_numerical_and_categorical(item)
+        print(f"Extracted data: {extracted}")
+        
+        if extracted:
+            relevant_data.append(extracted)
+    
+    print(f"\nTotal relevant data points: {len(relevant_data)}")
+    return relevant_data
 
-    return new_image
+def generate_visualizations(data, analysis_type):
+    """Generate appropriate visualizations based on data and analysis type"""
+    figures = []
+    
+    if not data:
+        return figures
+        
+    try:
+        # Convert data to DataFrame
+        df = pd.DataFrame(data)
+        print(f"DataFrame shape: {df.shape}")
+        print(f"DataFrame columns: {df.columns}")
+        print(f"DataFrame dtypes:\n{df.dtypes}")
+        
+        # Clean and prepare data for visualization
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        print(f"Numeric columns: {numeric_cols}")
+        
+        if analysis_type == 'correlation':
+            # Create correlation visualization for numeric columns only
+            if len(numeric_cols) >= 2:
+                corr_df = df[numeric_cols].corr()
+                fig = px.imshow(
+                    corr_df,
+                    title="Correlation Heatmap",
+                    labels=dict(color="Correlation"),
+                    color_continuous_scale="RdBu"
+                )
+                figures.append(fig)
+                
+                # Also create scatter plots for highly correlated variables
+                for i in range(len(numeric_cols)):
+                    for j in range(i+1, len(numeric_cols)):
+                        col1, col2 = numeric_cols[i], numeric_cols[j]
+                        corr = corr_df.loc[col1, col2]
+                        if abs(corr) > 0.5:  # Only plot significant correlations
+                            fig = px.scatter(
+                                df,
+                                x=col1,
+                                y=col2,
+                                title=f"{col1} vs {col2} (correlation: {corr:.2f})"
+                            )
+                            figures.append(fig)
+        
+        elif analysis_type == 'trend':
+            # Create time series visualization for each numeric column
+            if 'year' in df.columns:
+                df = df.sort_values('year')
+                for col in numeric_cols:
+                    if col != 'year':
+                        fig = px.line(
+                            df,
+                            x='year',
+                            y=col,
+                            title=f"{col} Over Time"
+                        )
+                        figures.append(fig)
+        
+        elif analysis_type == 'current_state':
+            # Create bar charts for current state
+            latest_year = df['year'].max() if 'year' in df.columns else None
+            if latest_year:
+                latest_data = df[df['year'] == latest_year]
+                for col in numeric_cols:
+                    if col != 'year':
+                        fig = px.bar(
+                            latest_data,
+                            y=col,
+                            title=f"{col} (Year {latest_year})"
+                        )
+                        figures.append(fig)
+        
+        print(f"Generated {len(figures)} visualizations")
+        
+    except Exception as e:
+        print(f"Error generating visualizations: {str(e)}")
+        import traceback
+        print(f"Visualization traceback: {traceback.format_exc()}")
+    
+    return figures
+
+def extract_numerical_and_categorical(data_dict, prefix=''):
+    """Recursively extract numerical and categorical data from nested dictionaries"""
+    extracted = {}
+    
+    if not isinstance(data_dict, dict):
+        return extracted
+    
+    for key, value in data_dict.items():
+        full_key = f"{prefix}_{key}" if prefix else key
+        
+        if isinstance(value, (int, float)):
+            # Clean the key name for better visualization
+            clean_key = full_key.replace('_', ' ').title()
+            extracted[clean_key] = float(value)  # Convert all numbers to float for consistency
+            
+        elif isinstance(value, str):
+            if value.replace('.','',1).isdigit():
+                clean_key = full_key.replace('_', ' ').title()
+                extracted[clean_key] = float(value)
+                
+        elif isinstance(value, dict):
+            nested = extract_numerical_and_categorical(value, full_key)
+            extracted.update(nested)
+            
+        elif isinstance(value, list):
+            for i, item in enumerate(value):
+                if isinstance(item, dict):
+                    nested = extract_numerical_and_categorical(item, f"{full_key}_{i}")
+                    extracted.update(nested)
+                elif isinstance(item, (int, float)):
+                    clean_key = f"{full_key} {i}".replace('_', ' ').title()
+                    extracted[clean_key] = float(item)
+    
+    return extracted
+
+def generate_response(question, relevant_data, analysis_type):
+    """Generate natural language response based on the data and question type"""
+    try:
+        if not relevant_data:
+            return "No relevant data found for your question."
+        
+        response = []
+        
+        # Convert relevant_data to DataFrame for easier analysis
+        df = pd.DataFrame(relevant_data)
+        
+        if analysis_type == 'trend':
+            # Analyze trends over time
+            if 'year' in df.columns:
+                df = df.sort_values('year')
+                response.append("\n**Trend Analysis:**")
+                
+                # Find overall trend
+                for col in df.select_dtypes(include=[np.number]).columns:
+                    if col != 'year':
+                        trend = np.polyfit(df['year'], df[col], 1)[0]
+                        direction = "increasing" if trend > 0 else "decreasing"
+                        response.append(f"- {col.replace('_', ' ').title()} shows an overall {direction} trend")
+                
+                # Identify significant changes
+                for col in df.select_dtypes(include=[np.number]).columns:
+                    if col != 'year':
+                        max_year = df.loc[df[col].idxmax(), 'year']
+                        min_year = df.loc[df[col].idxmin(), 'year']
+                        response.append(f"- Highest {col} observed in {max_year}")
+                        response.append(f"- Lowest {col} observed in {min_year}")
+                
+        elif analysis_type == 'correlation':
+            # Analyze relationships between variables
+            response.append("\n**Correlation Analysis:**")
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            
+            if len(numeric_cols) >= 2:
+                corr_matrix = df[numeric_cols].corr()
+                for i in range(len(numeric_cols)):
+                    for j in range(i+1, len(numeric_cols)):
+                        col1, col2 = numeric_cols[i], numeric_cols[j]
+                        corr = corr_matrix.loc[col1, col2]
+                        if abs(corr) > 0.5:  # Only report significant correlations
+                            strength = "strong" if abs(corr) > 0.7 else "moderate"
+                            direction = "positive" if corr > 0 else "negative"
+                            response.append(f"- {col1.replace('_', ' ').title()} shows a {strength} {direction} correlation with {col2.replace('_', ' ').title()}")
+                
+        elif analysis_type == 'current_state':
+            # Analyze current state
+            response.append("\n**Current State Analysis:**")
+            
+            # Get the most recent data
+            if 'year' in df.columns:
+                latest_year = df['year'].max()
+                latest_data = df[df['year'] == latest_year]
+                
+                response.append(f"\nLatest data (Year {latest_year}):")
+                for col in latest_data.select_dtypes(include=[np.number]).columns:
+                    if col != 'year':
+                        value = latest_data[col].iloc[0]
+                        response.append(f"- {col.replace('_', ' ').title()}: {value:,.0f}")
+            else:
+                # If no time dimension, report summary statistics
+                for col in df.select_dtypes(include=[np.number]).columns:
+                    mean_val = df[col].mean()
+                    response.append(f"- Average {col.replace('_', ' ').title()}: {mean_val:,.0f}")
+        
+        else:  # general analysis
+            response.append("\n**General Analysis:**")
+            
+            # Report key statistics
+            for col in df.select_dtypes(include=[np.number]).columns:
+                if col != 'year':
+                    mean_val = df[col].mean()
+                    max_val = df[col].max()
+                    min_val = df[col].min()
+                    response.append(f"\n{col.replace('_', ' ').title()}:")
+                    response.append(f"- Average: {mean_val:,.0f}")
+                    response.append(f"- Maximum: {max_val:,.0f}")
+                    response.append(f"- Minimum: {min_val:,.0f}")
+        
+        return "\n".join(response)
+        
+    except Exception as e:
+        print(f"Error generating response: {str(e)}")
+        return "Unable to generate analysis due to an error."
 
 # Gradio Interface
 # iface = gr.Interface(
