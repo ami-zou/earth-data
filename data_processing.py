@@ -31,7 +31,7 @@ for filename in os.listdir(image_dir):
         name = filename.split(".")[0]
         image_data[(crs, name)] = raster_data
 
-print("Successfully ETL tif data of length: ", len(image_data))
+print(f"Successfully ETL tif data of length: {len(image_data)}")
 
 from torchvision import models, transforms
 
